@@ -13,6 +13,7 @@ Gneiting<-function(h,u, al = 0.75, s2 = 0.968, a=0.5, c=1,beta)
 }
 
 ### Simulate the process with the given correlation function
+
 # Time points
 time <- 1:6
 nt = 6
