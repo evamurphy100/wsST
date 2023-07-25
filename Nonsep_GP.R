@@ -1,53 +1,78 @@
 #Simulate a Gaussian process with mean zero and a non-separable Gneiting correlation function
 
-Gneiting<-function(h,u, al = 0.75, s2 = 0.968, a=0.5, c=1,beta)
+Gneiting<-function(h,u,a=.5,c=1,beta)
 {
-  #al = temporal smoothness parameter
-  #s2 = variance of the spatio-temporal process
-  # a,c = temporal and spatialscaleing parameters
-  #beta = space-time interaction
-  part1=a*abs(u)^(2*al)+1;
+  part1=a*abs(u)+1;
   denom=part1^(beta/2);
   part2=exp(-c*h/denom);
-  return(s2*part2/part1);
+  return(part2/part1);
 }
 
-### Simulate the process with the given correlation function
+## Set up the locations and time points
+N = 16
+x <- seq(0,3, len = N)
+y <- seq(0,3, len = N)
+loc = expand.grid(x,y)
+plot(loc)
+t = 1:30 # number of days
+h = rdist(loc)
+u = rdist(t)
+bet = 1 
+n = dim(loc)[1] # number of locations
+p = length(t) # number of time points
 
-# Time points
-time <- 1:6
-nt = 6
-#spatial locations
-loc <- cbind(expand.grid(seq(-83, -74, len = 16), seq(30, 36, len = 16)))
-locdist <- rdist.earth(loc)
-ns = dim(loc)[1]
-#Compute the Covariance
-Sigma=matrix(0,ns*nt,ns*nt)
-for(space1 in 1:ns){
-    for(space2 in 1:ns)
+## Generate the nonseparable data
+data=integer(n*p)
+
+# Generate the covariance set-up
+Sigma11=matrix(0,n*p,n*p)
+for(space1 in 1:n)
+{
+  for(space2 in 1:n)
+  {
+    hlag=h[space1,space2]
+    for(time1 in 1:p)
     {
-      hlag=locdist[space1,space2]
-      for(time1 in 1:nt)
+      for(time2 in 1:p)
       {
-        for(time2 in 1:nt)
-        {
-          ulag=time2 - time1
-          index1=(time1-1)*ns+space1;
-          index2=(time2-1)*ns+space2;      
-          Sigma[index1,index2]=Gneiting(h = hlag, u=ulag, beta = .6)
-        }
+        ulag=u[time1, time2];
+        index1=(time1-1)*n+space1;
+        index2=(time2-1)*n+space2;      
+        Sigma11[index1,index2]=Gneiting(h=hlag,u=ulag,beta=bet)
       }
     }
   }
+}
+## Simulate a Gaussian process at loc locations for 
+library(parallel)
+library(foreach)
 
-#Simulate the covariance
-set.seed(123)
-xx.gneiting <- crossprod(chol(Sigma), rep(rnorm(nrow(loc) * 6)))
-## Create the time spatial data frame
-simdf.gneiting <- data.frame(lon = rep(loc[,1], each = 6), 
-                             lat = rep(loc[,2], each = 6), 
-                            dat= xx.gneiting, 
-                            time = rep(1:6,  nrow(loc)) )
-
-# plot
-lattice::levelplot(dat~ lon + lat|time, data = simdf.gneiting)
+cl = makeCluster(detectCores())
+#Activate cluster for each library
+registerDoParallel(cl)
+clusterEvalQ(cl, {
+  library(foreach)
+  library(doParallel)
+})
+## Simulate 100 replicates
+sim.ws.data = foreach(i = 1:100) %dopar% {
+## simulate 30 years of a month
+Z = replicate(30, rnorm(n*p, mean = rep(0, n*p), sd = ))
+data.ws.sim = array(dim = c(7680, 30))
+for( j in 1:30){
+  #data=t(L11)%*%Z[,i]
+  data.ws.sim[,j] = t(L11)%*%Z[,j]
+}
+Z.matrix = array(dim = c(256, 30, 30)) #30 days over 30 years
+for(j in 1:30){
+  Z.matrix[,,j] = matrix(data.ws.sim[,j], nrow = 256, ncol = 30)
+}
+Z.matrix
+}
+stopCluster(cl)
+#Plot a few replicates
+library(fields)
+quilt.plot(loc, sim.ws.data[[1]][,1,1])
+for(i in 1:10) {
+  image.plot(x,y, matrix(sim.ws.data[[1]][,1,i], nrow = 16, ncol = 16))
+}
