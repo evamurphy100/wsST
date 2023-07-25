@@ -1,0 +1,195 @@
+Harmonic <- function(doy, K){
+  # Build covariate for seasonal trend
+  t <- outer(2 * pi * doy, 1:K)
+  return(cbind(apply(t, 2, cos), apply(t, 2, sin)))
+}
+
+DSTM_EM = function (Z, Cov0, muinit, Ceta, M, sigma2_eps, H, itermax = 10, 
+                    tol = 0.1) 
+{ 
+  # This function estimates the dynamic system using an EM algorithm
+  # The code comes from the R-package acomponying the Spatio-Temporal Statistics with R book, Wikle et al. 2019.
+  Cov0 <- as(Cov0, "dsyMatrix")
+  Ceta <- as(Ceta, "dsyMatrix")
+  Mest <- as(M, "dgeMatrix")
+  cat("Initialising...\n")
+  n <- ncol(H)
+  nT <- ncol(Z)
+  m <- nrow(Z)
+  alpha_filter <- alpha_smooth <- alpha_pred <- matrix(0, n, nT)
+  alpha_filter[, 1] <- muinit
+  Cov_pred <- Q_pred <- Cov_filter <- Lfilter <- Cov_smooth <- Cov_cross <- list()
+  Cov_filter[[1]] <- Cov0
+  Lfilter[[1]] <- t(chol(as(Cov0, "dsyMatrix")))
+  alpha_resid <- obs_resid <- c()
+  I <- Diagonal(n)
+  Ceps <- sigma2_eps * Diagonal(m)
+  Qeps <- solve(Ceps)
+  Leta <- t(chol(Ceta))
+  Leps <- t(chol(Ceps))
+  L0 <- t(chol(Cov0))
+  twonegloglik <- c()
+  endloop <- FALSE
+  for (iter in 1:itermax) {
+    cat(paste0("Iteration ", iter, "\n"))
+    cat("...Filtering...\n")
+    for (i in 2:nT) {
+      alpha_pred[, i] <- Mest %*% alpha_filter[, i - 1] %>% 
+        as.numeric()
+      Cov_pred[[i]] <- Ceta + tcrossprod(Mest %*% Lfilter[[i - 1]])
+      Q_pred[[i]] <- chol2inv(chol(Cov_pred[[i]]))
+      Rinv <- solve(chol(Q_pred[[i]] + crossprod(forwardsolve(Leps,H))))
+      Temp1 <- Qeps - tcrossprod(Qeps %*% H %*% Rinv)
+      K <- Cov_pred[[i]] %*% t(H) %*% Temp1
+      KH <- K %*% H
+      alpha_filter[, i] <- (alpha_pred[, i] + K %*% Z[,i] - KH %*% alpha_pred[, i]) %>% as.numeric()
+      Cov_filter[[i]] <- Cov_pred[[i]] - crossprod(t(chol(Qeps)) %*% 
+                                                     H %*% Cov_pred[[i]]) + tcrossprod(Cov_pred[[i]] %*% 
+                                                                                         t(H) %*% Qeps %*% H %*% Rinv)
+      Lfilter[[i]] <- t(chol(Cov_filter[[i]]))
+    }
+    J <- dHPH <- list()
+    alpha_smooth[, nT] <- alpha_filter[, nT]
+    Cov_smooth[[nT]] <- Cov_filter[[nT]]
+    dHPH[[nT]] <- rowSums((H %*% Cov_smooth[[nT]]) * H)
+    alpha_resid[nT] <- crossprod(forwardsolve(Leta, alpha_smooth[, nT] - M %*% alpha_smooth[, i]))
+    obs_resid[nT] <- crossprod(forwardsolve(Leps, Z[, nT] - 
+                                              H %*% alpha_smooth[, nT]))
+    cat("...Smoothing...\n")
+    for (i in (nT - 1):1) {
+      J[[i]] <- Cov_filter[[i]] %*% t(Mest) %*% Q_pred[[i + 1]]
+      alpha_smooth[, i] <- (alpha_filter[, i] + J[[i]] %*% 
+                              (alpha_smooth[, i + 1] - alpha_pred[, i + 1])) %>% 
+        as.numeric()
+      Cov_smooth[[i]] <- Cov_filter[[i]] - tcrossprod(J[[i]] %*% 
+                                                        t(chol((Cov_pred[[i + 1]] - Cov_smooth[[i + 1]]))))
+      dHPH[[i]] <- rowSums((H %*% Cov_smooth[[i]]) * H)
+      alpha_resid[i] <- crossprod(forwardsolve(Leta, alpha_smooth[,i] - M %*% alpha_smooth[, i]))
+      obs_resid[i] <- crossprod(forwardsolve(Leps, Z[, i] - H %*% alpha_smooth[, i]))
+    }
+    cat("...Computing cross-covariances...\n")
+    Cov_cross[[nT]] <- (I - KH) %*% Mest %*% Cov_filter[[nT -  1]]
+    for (i in nT:3) {
+      Cov_cross[[i - 1]] <- Cov_filter[[i - 1]] %*% J[[i - 2]] + J[[i - 1]] %*% (Cov_cross[[i]] - Mest %*% 
+                                                                                   Cov_filter[[i - 1]]) %*% J[[i - 2]]
+    }
+    twonegloglik[iter] <- (2 * sum(log(diag(L0))) + 2 * nT * 
+                             sum(log(diag(Leta))) + 2 * nT * sum(log(diag(Leps))) + 
+                             crossprod(forwardsolve(L0, alpha_smooth[, 1] - muinit)) + 
+                             sum(alpha_resid) + sum(obs_resid)) %>% as.numeric()
+    if (iter == itermax) {
+      cat("Maximum iterations reached\n")
+      endloop <- TRUE
+    }
+    if (iter > 1) 
+      if (abs(twonegloglik[iter] - twonegloglik[iter - 1]) < tol) {
+        cat("Tolerance reached\n")
+        endloop <- TRUE
+      }
+    if (endloop) {
+      return(list(muinit = muinit, Cov0 = as(Cov0, "matrix"), 
+                  alpha_smooth = alpha_smooth, Cov_smooth = Cov_smooth, 
+                  Mest = as(Mest, "matrix"), Ceta = as(Ceta, "matrix"), 
+                  sigma2_eps = sigma2_eps, twonegloglik = twonegloglik))
+    }
+    S00 <- Reduce("+", Cov_smooth[-nT]) + tcrossprod(alpha_smooth[,  -nT])
+    R00 <- chol(S00)
+    S11 <- Reduce("+", Cov_smooth[-1]) + tcrossprod(alpha_smooth[, -1])
+    S10 <- Reduce("+", Cov_cross[-1]) + tcrossprod(alpha_smooth[, -1], alpha_smooth[, -nT])
+    cat("...M-step...\n")
+    muinit <- alpha_smooth[, 1]
+    Cov0 <- Cov_smooth[[1]]
+    Mest <- S10 %*% chol2inv(R00)
+    Ceta <- (S11 - crossprod(forwardsolve(t(R00), t(S10))))/nT
+    sigma2_eps <- (sum((Z - H %*% alpha_smooth)^2) + sum(sapply(dHPH,sum)))/(nT * m)
+    Ceps <- sigma2_eps * Diagonal(m)
+    Qeps <- solve(Ceps)
+    Leta <- t(chol(Ceta))
+    Leps <- t(chol(Ceps))
+    L0 <- t(chol(Cov0))
+  }
+}
+
+
+trend.est.cv = function(Day.data, doy, n.dat, n.loc){
+  # This function estimates the trend
+  Day.data.CV = list()
+  # Select the training data
+  for(i in 1:365){
+    Day.data.CV[[i]] = Day.data[[i]][1:n.dat, ]
+  }
+  # Compute mean and sd over all years
+  Day.data.yrmean.CV = lapply(Day.data.CV, function(x) apply(x, 2, mean))
+  Day.data.yrsd.CV = lapply(Day.data.CV, function(x) apply(x, 2, sd))
+  # Set up the covaraites
+  harmonics.inter.CV <- Harmonic(1:365/365.25, 4)
+  day.data.estimated.CV = array(dim = c(365, n.loc))
+  trend.coefficients.day.data.CV = array(dim = c(9, n.loc))
+  # Perform Weighted Harmonic regression
+  for(i in 1:n.loc){
+    WS = sapply(Day.data.yrmean.CV, function(x) x[i])
+    SD = sapply(Day.data.yrsd.CV, function(x) x[i])
+    model.fit = lm(WS ~ harmonics.inter.CV, weights = 1/SD^2)
+    day.data.estimated.CV[,i] = model.fit$fitted.values
+    trend.coefficients.day.data.CV[,i] = model.fit$coefficients
+  }
+  # Return the day estimate for the chosen day
+  return(day.data.estimated.CV[doy,])
+}
+
+detrended.data = function(trend.est, Day.data, doy, n.dat){
+  #This functions detrends the data
+  Day.data = Day.data[[doy]][1:n.dat, ]
+  #Subtract trend from data
+  WS.detrend.CV = sweep(Day.data, 2, c(trend.est), "-")
+  # Returns the detrended data for the given day
+  return(WS.detrend.CV)
+}
+
+compute.eof.doy = function(detrend.data, n.dat, locs.ws){
+  # This function computes the EOFs and PCs for a given day
+  #Compute the EOFs
+  EOFs.CV = svd(detrend.data)
+  # Save the EOFs and Pcs in a matrix
+  V = EOFs.CV$v
+  PC.CV = EOFs.CV$u %*% diag(EOFs.CV$d)
+  colnames(V) = paste0("EOF", 1:n.dat)
+  EOF.locs.CV = cbind(locs.ws, V)
+  # Choose the number of Eofs
+  n = 7
+  # Compute EOF*PC
+  EofPc.CV = as.matrix(EOF.locs.CV[,4:(n+3)]) %*% t(PC.CV[,1:n])
+  # Return EOF*PC, EOFs and PCs 
+  return(list(EofPc.CV, EOF.locs.CV, PC.CV, EOFs.CV$d, EOFs.CV$v))
+}
+
+dynamic.system = function(detrend.data, EofPc){
+  # This function subtracts the EOF*PC part from the detrended data
+  WS_dynamic.CV = detrend.data - t(EofPc)
+  return(WS_dynamic.CV)
+}
+
+MOM.estimates = function(dynamic.data, n.dat){
+  # This function estimates H, C0, M, C_eta of the dynamic system
+  # the code comes from the Spatio-Temporal Statistics with R book, Wikle et al. 2019.
+  nT.ws.CV= nT.CV = n.dat
+  WS_dynamic.Zt.CV = 1/(nT.CV-1)* (dynamic.data)
+  # Compute matrix H 
+  SVD.decom.0.CV = svd(WS_dynamic.Zt.CV)
+  n.ds = 13
+  # Compute initial values for Cov0, M, Ceta using MOM method
+  TS.CV =  (dynamic.data) %*% SVD.decom.0.CV$v[, 1:n.ds]
+  tau = 1
+  TStplustau.CV = TS.CV[-(1:tau), ]
+  TSt.CV = TS.CV[-((nT.CV-(tau-1)):nT.CV), ]
+  # Estimate the Covaraince of the system
+  Cov0.CV = crossprod(TS.CV)/nT.CV
+  Covtau.CV = crossprod(TStplustau.CV,TSt.CV)/(nT.CV - tau)
+  C0inv.CV = solve(Cov0.CV)
+  # Estimate the transition matrix
+  Mest = Covtau.CV %*% C0inv.CV
+  # Estimate the covariance of the dynamic error
+  Ceta.CV = Cov0.CV - Covtau.CV %*% C0inv.CV %*% t(Covtau.CV)
+  return(list(n.ds, Cov0.CV, Mest, Ceta.CV, SVD.decom.0.CV))
+}
+
